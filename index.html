@@ -482,6 +482,7 @@ details.fold > *:not(summary){margin-top:6px}
 #pp,#nextBtn,#lineupBtn2,#nowCard,#status,#sonosFold,#testPlaylist,#testQueue,#autoplayChk,label:has(#autoplayChk){display:none!important}
 .genbox{display:grid;gap:10px;margin-top:4px}
 .lenpick{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.orderpick{grid-template-columns:repeat(3,minmax(0,1fr))}
 .lenbtn{min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--key);color:var(--ink);font-weight:700;font-size:14px}
 .lenbtn[aria-checked="true"]{border-color:#00E5FF;color:#00E5FF;background:#062A31}
 .genbtns{display:flex;flex-wrap:wrap;gap:8px}
@@ -558,6 +559,7 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
       <div class="presets" id="presets" role="group" aria-label="Station presets"></div>
       <div class="genbox" id="genBox">
         <div class="lenpick" role="radiogroup" aria-label="Playlist length" id="lenPick"></div>
+        <div class="lenpick orderpick" role="radiogroup" aria-label="Song order" id="orderPick"></div>
         <div class="genbtns">
           <label class="gentarget">Send to <select id="genTarget" aria-label="Playlist to send to"></select></label>
           <button class="btn primary sendbtn" id="genSend">Send to Spotify</button>
@@ -681,6 +683,13 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
     <label for="unratedSel" style="margin-top:12px">Songs with no rating play as</label>
     <select id="unratedSel"><option value="1">1★ Ultra-niche</option><option value="2">2★ Cult indie</option><option value="3">3★ Somewhat popular</option><option value="4">4★ Very popular</option><option value="5">5★ Megastar</option></select>
     <label class="chk" style="margin-top:10px!important"><input type="checkbox" id="autoplayChk"> Start playing when the app opens</label>
+
+    <details class="fold" id="bpmFold"><summary class="foldsum">BPM (tempo) <span class="muted">from Deezer</span></summary>
+      <p>Knarly looks up each song’s tempo once in Deezer’s free catalog and saves it. Used by the Slow to fast and Party build orders. Some songs aren’t on Deezer or have no BPM there.</p>
+      <div class="row left"><button class="btn" id="bpmGo">Look up BPM</button></div>
+      <p class="msg" id="bpmStatus" style="margin-top:8px"></p>
+      <div class="msg" id="bpmMsg" role="status"></div>
+    </details>
 
     <details class="fold" id="carFold"><summary class="foldsum">All station playlists <span class="muted">(optional)</span></summary>
       <p>Refreshes every station’s “Knarly” playlist at once (about four hours each), instead of one at a time with Send to Spotify.</p>
@@ -815,7 +824,7 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
   </div>
 </dialog>
 
-<div class="revtag" aria-hidden="true">P72</div>
+<div class="revtag" aria-hidden="true">P73</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -1672,7 +1681,117 @@ const GEN_LENGTHS = [60, 120, 240, 480];   // minutes
 const GEN = { ids: [], busy: false };
 const genMinutes = () => GEN_LENGTHS.includes(S.settings.genMinutes) ? S.settings.genMinutes : 240;
 const genTotalMs = () => GEN.ids.reduce((a, id) => a + ((S.byId.get(id) || {}).dur || 0), 0);
+/* ---------- BPM (tempo) from Deezer's free catalog ----------
+   Spotify no longer gives tempo to new apps, and Last.fm doesn't have it. Deezer lists BPM for many songs.
+   Each song is looked up once (by ISRC, then by artist and title) and saved: id -> bpm, 0 = Deezer has none. */
+const BPM = { data: {}, running: false };
+const bpmOf = s => (s && BPM.data[s.id]) || 0;
+// Deezer's API doesn't accept ordinary requests from web pages, so this uses its JSONP option.
+function deezer(path) {
+  return new Promise((resolve, reject) => {
+    const cb = '__dz' + Math.random().toString(36).slice(2);
+    const sc = document.createElement('script');
+    const done = () => { clearTimeout(timer); delete window[cb]; sc.remove(); };
+    const timer = setTimeout(() => { done(); reject(Object.assign(new Error('Deezer didn’t answer.'), { net: true })); }, 12000);
+    window[cb] = d => { done(); resolve(d); };
+    sc.onerror = () => { done(); reject(Object.assign(new Error('Couldn’t reach Deezer.'), { net: true })); };
+    sc.src = `https://api.deezer.com/${path}${path.includes('?') ? '&' : '?'}output=jsonp&callback=${cb}`;
+    document.head.appendChild(sc);
+  });
+}
+async function deezerCall(path) {
+  for (let tries = 0; ; tries++) {
+    const d = await deezer(path);
+    if (d && d.error && (d.error.code === 4 || d.error.code === 700) && tries < 4) { await sleep(5500); continue; }   // over the limit or busy: wait
+    return d;
+  }
+}
+async function bpmLookup(s) {
+  let d = s.isrc ? await deezerCall('track/isrc:' + encodeURIComponent(s.isrc)) : null;
+  if (!d || d.error || !d.id) {
+    const q = await deezerCall('search?limit=1&q=' + encodeURIComponent(`artist:"${s.artist}" track:"${s.title}"`));
+    const hit = q && q.data && q.data[0];
+    if (!hit) return 0;
+    d = await deezerCall('track/' + hit.id);
+  }
+  return d && d.bpm > 0 ? Math.round(d.bpm) : 0;
+}
+function bpmStatus() {
+  const songs = S.songs.filter(s => s.uri);
+  const checked = songs.filter(s => s.id in BPM.data).length, have = songs.filter(s => BPM.data[s.id] > 0).length;
+  return { total: songs.length, checked, have, missing: checked - have, todo: songs.length - checked };
+}
+function renderBpmStatus() {
+  const el = $('#bpmStatus'); if (!el) return;
+  const b = bpmStatus();
+  el.textContent = !b.total ? 'Connect Spotify to load your songs.'
+    : `${b.have.toLocaleString()} of ${b.total.toLocaleString()} songs have a BPM.` + (b.missing ? ` ${b.missing.toLocaleString()} aren’t on Deezer or have no BPM there.` : '') + (b.todo ? ` ${b.todo.toLocaleString()} not checked yet.` : ' Up to date.');
+}
+async function lookUpBpm(report) {
+  if (BPM.running) return;
+  if (S.mode !== 'spotify') { report('Connect Spotify first. The demo songs aren’t real.', true); return; }
+  const todo = S.songs.filter(s => s.uri && !(s.id in BPM.data));
+  if (!todo.length) { report('Every song has been checked.'); renderBpmStatus(); return; }
+  BPM.running = true; let done = 0, netFails = 0;
+  try {
+    for (const s of todo) {
+      try { BPM.data[s.id] = await bpmLookup(s); netFails = 0; }
+      catch (e) { if (e.net && ++netFails >= 3) { report('Can’t reach Deezer right now. Try again later; finished songs are saved.', true); break; } }
+      done++;
+      if (done % 20 === 0) { IDB.set('bpm', BPM.data); report(`Looking up BPM… ${done.toLocaleString()} of ${todo.length.toLocaleString()}`); renderBpmStatus(); }
+      await sleep(260);   // stays well under Deezer's limit of 50 requests per 5 seconds
+    }
+  } finally {
+    BPM.running = false; await IDB.set('bpm', BPM.data); renderBpmStatus();
+    if (netFails < 3) report(`Done. ${bpmStatus().have.toLocaleString()} songs have a BPM.`);
+    genGenerate();
+  }
+}
+
+/* ---------- Song order ---------- */
+const ORDERS = { mix: 'Station mix', ramp: 'Slow to fast', party: 'Party build' };
+const genOrder = () => ORDERS[S.settings.genOrder] ? S.settings.genOrder : 'mix';
+// Puts a BPM-sorted list in order while avoiding the same artist twice in a row.
+function spreadArtists(list) {
+  for (let k = 1; k < list.length; k++) {
+    if (list[k].artist !== list[k - 1].artist) continue;
+    for (let j = k + 1; j < Math.min(list.length, k + 4); j++) {
+      if (list[j].artist !== list[k - 1].artist) { [list[k], list[j]] = [list[j], list[k]]; break; }
+    }
+  }
+  return list;
+}
+function genGenerateBpm(order) {
+  const target = genMinutes() * 60000;
+  const seen = new Set(), pool = [];
+  for (const id of picksForStation(S.current, Math.ceil(genMinutes() / 2.5) * 3 + 80)) {
+    const s = S.byId.get(id);
+    if (s && !seen.has(id) && bpmOf(s)) { seen.add(id); pool.push(s); }
+  }
+  GEN.bpmShort = false;
+  if (!pool.length) { GEN.ids = []; GEN.noBpm = true; return; }
+  GEN.noBpm = false;
+  const fill = (from, ms) => { const out = []; let t = 0; for (const s of from) { if (t >= ms) break; out.push(s); t += s.dur; } return out; };
+  const asc = (a, b) => bpmOf(a) - bpmOf(b);
+  let list;
+  if (order === 'ramp') {
+    list = fill(pool, target).sort(asc);
+  } else {
+    // Party build: first 90% from the station's slower and mid-tempo songs, rising gently;
+    // last 10% from its fastest songs, so the tempo climbs steeply at the end.
+    const sorted = pool.slice().sort(asc);
+    const cut = bpmOf(sorted[Math.floor(sorted.length * 0.75)]);
+    const peak = fill(pool.filter(s => bpmOf(s) > cut).sort((a, b) => bpmOf(b) - bpmOf(a)), target * 0.1).sort(asc);
+    const peakIds = new Set(peak.map(s => s.id));
+    const main = fill(pool.filter(s => !peakIds.has(s.id) && bpmOf(s) <= cut), target - peak.reduce((a, s) => a + s.dur, 0)).sort(asc);
+    list = [...main, ...peak];
+  }
+  if (list.reduce((a, s) => a + s.dur, 0) < target * 0.9) GEN.bpmShort = true;
+  GEN.ids = spreadArtists(list).map(s => s.id);
+}
 function genGenerate() {
+  if (genOrder() !== 'mix') { genGenerateBpm(genOrder()); renderNext(); renderLcd(); return; }
+  GEN.noBpm = GEN.bpmShort = false;
   const st = S.stations[S.current];
   if (S.current !== ALL && !mixFor(st).pool.length) { GEN.ids = []; renderNext(); renderLcd(); return; }
   const target = genMinutes() * 60000;
@@ -1696,7 +1815,8 @@ function savedPlaylists() { if (!Array.isArray(S.settings.savedPlaylists)) S.set
 function suggestName() {
   const focus = S.current === ALL ? 'All genres' : ($('#specVal').textContent || S.stations[S.current].genre).trim();
   const pop = ($('#popVal').textContent || '').trim();
-  return pop && pop !== 'Balanced' ? `${focus} · ${pop}` : `${focus} · Balanced`;
+  const base = `${focus} · ${pop || 'Balanced'}`;
+  return genOrder() === 'mix' ? base : `${base} · ${ORDERS[genOrder()]}`;
 }
 function renderTargets(stationChanged) {
   const sel = $('#genTarget'); if (!sel) return;
@@ -1718,7 +1838,7 @@ async function sendPlaylist(target) {
   const isNew = typeof target === 'object', isStation = target === 'station';
   const known = !isNew && !isStation ? saved.find(x => x.id === target) : null;
   const name = isNew ? target.newName : isStation ? carName(i) : known ? known.name : carName(i);
-  const description = `Made by Knarly: ${genre}, ${$('#specVal').textContent || ''}, ${$('#popVal').textContent || ''}. ${new Date().toLocaleString()}. Your music. Your rules.`;
+  const description = `Made by Knarly: ${genre}, ${$('#specVal').textContent || ''}, ${$('#popVal').textContent || ''}, ${ORDERS[genOrder()]}. ${new Date().toLocaleString()}. Your music. Your rules.`;
   const uris = songs.map(s => s.uri);
   genMsg(`Sending ${songs.length} songs to Spotify…`);
   try {
@@ -1752,11 +1872,16 @@ async function sendPlaylist(target) {
 function renderGen() {
   const el = $('#next'); if (!el) return;
   const st = S.stations[S.current];
+  if (!GEN.ids.length && GEN.noBpm) { el.innerHTML = '<p class="muted" style="margin:0">No songs on this station have a BPM yet. Open Library → BPM (tempo) and tap Look up BPM, or choose Station mix.</p>'; return; }
   if (!GEN.ids.length) { el.innerHTML = `<p class="muted" style="margin:0">${S.current !== ALL && !mixFor(st).pool.length ? 'No songs on this station yet. Tag some under Library & stations.' : 'Building the playlist…'}</p>`; return; }
-  el.innerHTML = `<p class="muted" style="margin:0 0 6px;font-size:13px">${GEN.ids.length} songs · ${fmtMin(genTotalMs() / 60000)}</p>` + GEN.ids.map((id, n) => {
+  const bpms = GEN.ids.map(id => bpmOf(S.byId.get(id))).filter(Boolean);
+  const range = genOrder() !== 'mix' && bpms.length ? ` · ${bpms[0]} → ${bpms[bpms.length - 1]} BPM` : '';
+  const short = GEN.bpmShort ? `<p class="msg err" style="margin:0 0 6px;font-size:13px">Not enough songs with a BPM for the full length. Run Look up BPM in Library.</p>` : '';
+  el.innerHTML = short + `<p class="muted" style="margin:0 0 6px;font-size:13px">${GEN.ids.length} songs · ${fmtMin(genTotalMs() / 60000)}${range}</p>` + GEN.ids.map((id, n) => {
     const s = S.byId.get(id); if (!s) return '';
     const other = s.genre !== st.genre && !st.all ? `, ${esc(s.genre)}` : '';
-    return `<div class="qrow"><div style="min-width:0"><div class="tt">${n + 1}. ${esc(s.title)}</div><div class="aa">${esc(s.artist)}${other}</div></div><div class="k">${STARS(starsOf(s))}</div></div>`;
+    const b = bpmOf(s);
+    return `<div class="qrow"><div style="min-width:0"><div class="tt">${n + 1}. ${esc(s.title)}</div><div class="aa">${esc(s.artist)}${other}${b ? ` · ${b} BPM` : ''}</div></div><div class="k">${STARS(starsOf(s))}</div></div>`;
   }).join('');
 }
 function buildBatch(n, t, seedHist, keep) {
@@ -2254,7 +2379,7 @@ function renderLcd() {
   $('#lcdGenre').textContent = st.genre || '';
   if (GEN_MODE) {
     $('#lcdSong').textContent = GEN.ids.length ? `${GEN.ids.length} songs · ${fmtMin(genTotalMs() / 60000)} playlist` : 'No songs on this station yet';
-    $('#lcdInfo').textContent = `${genMinutes() / 60}H MIX`;
+    $('#lcdInfo').textContent = `${genMinutes() / 60}H · ${genOrder() === 'mix' ? 'MIX' : ORDERS[genOrder()].toUpperCase()}`;
     return;
   }
   $('#lcdSong').textContent = s ? `${s.title} · ${s.artist}` : (S.mode === 'spotify' && !S.auth ? 'Connect Spotify to start' : 'Press play');
@@ -2550,6 +2675,12 @@ function bind() {
   // Playlist generator controls
   const renderLens = () => { $('#lenPick').innerHTML = GEN_LENGTHS.map(m => `<button class="lenbtn" role="radio" aria-checked="${m === genMinutes()}" data-min="${m}">${m / 60} hour${m === 60 ? '' : 's'}</button>`).join(''); };
   renderLens();
+  const renderOrders = () => { $('#orderPick').innerHTML = Object.entries(ORDERS).map(([k, v]) => `<button class="lenbtn" role="radio" aria-checked="${k === genOrder()}" data-order="${k}">${v}</button>`).join(''); };
+  renderOrders();
+  $('#orderPick').addEventListener('click', e => { const b = e.target.closest('[data-order]'); if (!b) return; S.settings.genOrder = b.dataset.order; LS.set('settings', S.settings); renderOrders(); genGenerate(); });
+  const bpmReport = (t, err) => { const m = $('#bpmMsg'); m.className = 'msg' + (err ? ' err' : ''); m.textContent = t; };
+  $('#bpmGo').addEventListener('click', () => lookUpBpm(bpmReport));
+  $('#bpmFold').addEventListener('toggle', e => { if (e.target.open) renderBpmStatus(); });
   $('#lenPick').addEventListener('click', e => { const b = e.target.closest('[data-min]'); if (!b) return; S.settings.genMinutes = +b.dataset.min; LS.set('settings', S.settings); renderLens(); genGenerate(); });
   renderTargets();
   $('#genSend').addEventListener('click', () => sendPlaylist($('#genTarget').value || 'station'));
@@ -2740,7 +2871,7 @@ function bind() {
   $('#backupBtn').addEventListener('click', async () => {
     savePlays();
     const data = { app: 'rotation-spotify', saved: new Date().toISOString(), keys: {} };
-    data.library = await IDB.get('library'); data.lfm = await IDB.get('lfm');
+    data.library = await IDB.get('library'); data.lfm = await IDB.get('lfm'); data.bpm = await IDB.get('bpm');
     for (const k of BACKUP_KEYS) { const v = LS.get(k, undefined); if (v !== undefined) data.keys[k] = v; }
     const name = `knarly-backup-${new Date().toISOString().slice(0, 10)}.json`;
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
@@ -2766,6 +2897,7 @@ function bind() {
       for (const k of BACKUP_KEYS) if (k in data.keys) LS.set(k, data.keys[k]);
       if (data.library) await IDB.set('library', data.library);
       if (data.lfm) await IDB.set('lfm', data.lfm);
+      if (data.bpm) await IDB.set('bpm', data.bpm);
       m.textContent = 'Restored. Reloading…';
       setTimeout(() => location.reload(), 800);
     } catch (err) { m.textContent = err.message || 'Couldn’t read that file.'; m.classList.add('err'); }
@@ -2901,6 +3033,7 @@ async function init() {
   const sonosLinked = readSonosSetupLink();
   LFM.data = (await IDB.get('lfm')) || {};
   LFM.tags = (await IDB.get('lfmTags')) || {};
+  BPM.data = (await IDB.get('bpm')) || {};
   S.lfmGenre = (await IDB.get('lfmGenre')) || {};
   // Signed in to Spotify? Stay on your library, never the demo. Load the saved copy, or fetch it again if none was saved.
   let needLoad = false;
