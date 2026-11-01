@@ -839,7 +839,7 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
   </div>
 </dialog>
 
-<div class="revtag" aria-hidden="true">P75</div>
+<div class="revtag" aria-hidden="true">P76</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -2208,7 +2208,8 @@ function renderAllSongs() {
   const f = $('#allFilter').value;
   if (f === 'nobpm') rows = rows.filter(s => !bpmOf(s));
   if (f === 'mybpm') rows = rows.filter(s => BPM.manual[s.id]);
-  rows.sort((a, b) => starsOf(b) - starsOf(a) || a.title.localeCompare(b.title));
+  if (f === 'nobpm' || f === 'mybpm') rows.sort((a, b) => a.artist.localeCompare(b.artist, undefined, { sensitivity: 'base' }) || a.title.localeCompare(b.title));   // by artist, then title
+  else rows.sort((a, b) => starsOf(b) - starsOf(a) || a.title.localeCompare(b.title));
   $('#allCount').textContent = `${rows.length.toLocaleString()} songs on this station` + (rows.length > 200 ? '. Showing the first 200; search to find others.' : '.');
   $('#allList').innerHTML = rows.slice(0, 200).map(s => songRow(s, true)).join('');
 }
