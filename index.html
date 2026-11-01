@@ -493,6 +493,14 @@ a#genOpen{display:inline-flex;align-items:center;text-decoration:none}
 .gentarget select{flex:1;min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--key);color:var(--ink);padding:0 10px;font-weight:600}
 #nameInput{width:100%;min-height:48px;font-size:17px}
 a#genOpen[hidden],#genReauth[hidden]{display:none!important}
+
+/* P74: BPM boxes, neighbor genres */
+.bpmIn{width:64px;min-height:36px;border:1px solid var(--line);border-radius:8px;background:var(--key);color:var(--ink);text-align:center;font-weight:700;font-size:14px;padding:0 4px;flex:none}
+.bpmIn.set{border-color:#00E5FF;color:#00E5FF}
+.allbar{display:flex;gap:8px}.allbar input{flex:1;min-width:0}.allbar select{min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--key);color:var(--ink);padding:0 8px;font-weight:600}
+.nbrow{display:grid;gap:6px;padding:10px 0;border-top:1px solid var(--line)}
+.nbsel{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.nbsel select{min-height:40px;border:1px solid var(--line);border-radius:8px;background:var(--key);color:var(--ink);padding:0 6px;font-size:13px;min-width:0}
 </style>
 </head>
 <body>
@@ -684,9 +692,15 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
     <select id="unratedSel"><option value="1">1★ Ultra-niche</option><option value="2">2★ Cult indie</option><option value="3">3★ Somewhat popular</option><option value="4">4★ Very popular</option><option value="5">5★ Megastar</option></select>
     <label class="chk" style="margin-top:10px!important"><input type="checkbox" id="autoplayChk"> Start playing when the app opens</label>
 
+    <details class="fold" id="nbFold"><summary class="foldsum">Neighbor genres</summary>
+      <p>Choose which genres join a station, in order, as you turn Genre focus toward Adjacent: the first neighbor joins first, then the second, then the third. Leave a station on Built-in to keep Knarly’s own choices.</p>
+      <div id="nbList"></div>
+    </details>
+
     <details class="fold" id="bpmFold"><summary class="foldsum">BPM (tempo) <span class="muted">from Deezer</span></summary>
       <p>Knarly looks up each song’s tempo once in Deezer’s free catalog and saves it. Used by the Slow to fast and Party build orders. Some songs aren’t on Deezer or have no BPM there.</p>
-      <div class="row left"><button class="btn" id="bpmGo">Look up BPM</button></div>
+      <div class="row left"><button class="btn" id="bpmGo">Look up BPM</button><button class="btn" id="bpmFix">Add or fix BPMs</button></div>
+      <p class="muted" style="font-size:13px;margin-top:6px">Add or fix BPMs opens this station’s songs. Type a BPM in any song’s box; your number always wins over Deezer’s. Clear the box to go back to Deezer’s.</p>
       <p class="msg" id="bpmStatus" style="margin-top:8px"></p>
       <div class="msg" id="bpmMsg" role="status"></div>
     </details>
@@ -761,7 +775,8 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
       </div>
     </div>
     <div id="paneAll" role="tabpanel" hidden>
-      <input type="text" id="allQ" placeholder="Search this station" aria-label="Search this station">
+      <div class="allbar"><input type="text" id="allQ" placeholder="Search this station" aria-label="Search this station">
+        <select id="allFilter" aria-label="Show"><option value="all">All songs</option><option value="nobpm">Missing BPM</option><option value="mybpm">BPM set by you</option></select></div>
       <p class="muted" id="allCount" style="margin:8px 0 0"></p>
       <div id="allList" class="sortlist"></div>
       <div class="row"><button class="btn primary" id="allDone">Done</button></div>
@@ -824,7 +839,7 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
   </div>
 </dialog>
 
-<div class="revtag" aria-hidden="true">P73</div>
+<div class="revtag" aria-hidden="true">P74</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -936,8 +951,12 @@ const EDGE = new Map();
 EDGES.split('|').map(s => s.trim()).filter(Boolean).forEach(s => { const [a, b, w] = s.split(' '); EDGE.set(a + '|' + b, +w); EDGE.set(b + '|' + a, +w); });
 // Works for your own genre names too: "90s Hip Hop" is read as hip-hop, "Indie Rock" as alternative.
 const famOfName = n => NAME_TO_FAM[n] || PRIORITY.find(f => FAMILY_RE[f].test(n)) || null;
+// Neighbors you chose for a station, in order: the first joins first as Genre focus turns toward Adjacent.
+const NEIGHBOR_SIM = [0.9, 0.72, 0.58];
 function genreSim(a, b) {
   if (a === b) return 1;
+  const mine = S.settings && S.settings.neighbors && S.settings.neighbors[a];
+  if (mine && mine.some(Boolean)) { const k = mine.indexOf(b); return k >= 0 ? NEIGHBOR_SIM[k] || 0.5 : 0; }
   const fa = famOfName(a), fb = famOfName(b);
   if (!fa || !fb) return 0;
   return fa === fb ? 0.8 : (EDGE.get(fa + '|' + fb) || 0);
@@ -1684,8 +1703,14 @@ const genTotalMs = () => GEN.ids.reduce((a, id) => a + ((S.byId.get(id) || {}).d
 /* ---------- BPM (tempo) from Deezer's free catalog ----------
    Spotify no longer gives tempo to new apps, and Last.fm doesn't have it. Deezer lists BPM for many songs.
    Each song is looked up once (by ISRC, then by artist and title) and saved: id -> bpm, 0 = Deezer has none. */
-const BPM = { data: {}, running: false };
-const bpmOf = s => (s && BPM.data[s.id]) || 0;
+const BPM = { data: {}, manual: {}, running: false };   // manual: BPMs you typed in; they always win over Deezer's
+const bpmOf = s => (s && (BPM.manual[s.id] || BPM.data[s.id])) || 0;
+function setManualBpm(id, v) {
+  const n = Math.round(+v);
+  if (!v || !n) delete BPM.manual[id];
+  else BPM.manual[id] = Math.max(40, Math.min(250, n));
+  IDB.set('bpmManual', BPM.manual);
+}
 // Deezer's API doesn't accept ordinary requests from web pages, so this uses its JSONP option.
 function deezer(path) {
   return new Promise((resolve, reject) => {
@@ -1718,14 +1743,14 @@ async function bpmLookup(s) {
 }
 function bpmStatus() {
   const songs = S.songs.filter(s => s.uri);
-  const checked = songs.filter(s => s.id in BPM.data).length, have = songs.filter(s => BPM.data[s.id] > 0).length;
-  return { total: songs.length, checked, have, missing: checked - have, todo: songs.length - checked };
+  const checked = songs.filter(s => s.id in BPM.data || BPM.manual[s.id]).length, have = songs.filter(s => bpmOf(s) > 0).length;
+  return { total: songs.length, checked, have, missing: checked - have, todo: songs.length - checked, mine: songs.filter(s => BPM.manual[s.id]).length };
 }
 function renderBpmStatus() {
   const el = $('#bpmStatus'); if (!el) return;
   const b = bpmStatus();
   el.textContent = !b.total ? 'Connect Spotify to load your songs.'
-    : `${b.have.toLocaleString()} of ${b.total.toLocaleString()} songs have a BPM.` + (b.missing ? ` ${b.missing.toLocaleString()} aren’t on Deezer or have no BPM there.` : '') + (b.todo ? ` ${b.todo.toLocaleString()} not checked yet.` : ' Up to date.');
+    : `${b.have.toLocaleString()} of ${b.total.toLocaleString()} songs have a BPM.` + (b.missing ? ` ${b.missing.toLocaleString()} aren’t on Deezer or have no BPM there.` : '') + (b.todo ? ` ${b.todo.toLocaleString()} not checked yet.` : ' Up to date.') + (b.mine ? ` ${b.mine.toLocaleString()} set by you.` : '');
 }
 async function lookUpBpm(report) {
   if (BPM.running) return;
@@ -2062,17 +2087,17 @@ function lineupSource() {
   if (playingRemote()) return R.batch.slice(R.batch.indexOf(S.np.id) + 1).filter(id => S.byId.has(id));
   extendQueue(20); return S.queue.slice();
 }
-function openLineup(tab) {
+function openLineup(tab, filter) {
   ED.open = null;
   const st = S.stations[S.current];
   L.ids = lineupSource(); L.changed = false;
   $('#lineupTitle').textContent = stationLabel();
-  renderLineup(); showLineupTab(tab || 'q'); $('#lineup').showModal();
+  renderLineup(); showLineupTab(tab || 'q', filter); $('#lineup').showModal();
 }
-function showLineupTab(t) {
+function showLineupTab(t, filter) {
   $('#tabQ').setAttribute('aria-selected', t === 'q'); $('#tabAll').setAttribute('aria-selected', t === 'all');
   $('#paneQ').hidden = t !== 'q'; $('#paneAll').hidden = t !== 'all';
-  if (t === 'all') { $('#allQ').value = ''; renderAllSongs(); }
+  if (t === 'all') { $('#allQ').value = ''; $('#allFilter').value = filter || 'all'; renderAllSongs(); }
 }
 function renderLineup() {
   const st = S.stations[S.current];
@@ -2141,6 +2166,9 @@ function renderAllSongs() {
   const st = S.stations[S.current], q = norm($('#allQ').value);
   let rows = mixFor(st).pool.slice();
   if (q) rows = rows.filter(s => norm(s.title + ' ' + s.artist).includes(q));
+  const f = $('#allFilter').value;
+  if (f === 'nobpm') rows = rows.filter(s => !bpmOf(s));
+  if (f === 'mybpm') rows = rows.filter(s => BPM.manual[s.id]);
   rows.sort((a, b) => starsOf(b) - starsOf(a) || a.title.localeCompare(b.title));
   $('#allCount').textContent = `${rows.length.toLocaleString()} songs on this station` + (rows.length > 200 ? '. Showing the first 200; search to find others.' : '.');
   $('#allList').innerHTML = rows.slice(0, 200).map(s => songRow(s, true)).join('');
@@ -2161,9 +2189,13 @@ function genreEditor(s) {
   return `<div class="ged"><label>Genre <select data-sg="${esc(s.id)}">${genreOptions(S.tags.song[s.id] || '', `Same as artist or playlist (${baseGenreOf(s)})`)}</select></label>
     <label>Also plays on <select data-sa="${esc(s.id)}">${genreOptions(S.tags.also.song[s.id] || '', 'No second genre')}</select></label></div>`;
 }
+function bpmBox(s) {
+  const mine = !!BPM.manual[s.id], v = bpmOf(s);
+  return `<input class="bpmIn${mine ? ' set' : ''}" type="number" inputmode="numeric" min="40" max="250" data-bpm="${esc(s.id)}" value="${v || ''}" placeholder="BPM" aria-label="BPM for ${esc(s.title)}" title="${mine ? 'Your BPM. Clear it to use Deezer’s.' : v ? 'From Deezer. Type a number to change it.' : 'No BPM yet. Type one in.'}">`;
+}
 function songRow(s, compact) {
   return `<div class="allrow" data-row="${esc(s.id)}"><div class="tx"><b>${esc(s.title)}</b><span>${esc(s.artist)}</span></div>
-    <span class="k">${STARS(starsOf(s))}</span>${genreChip(s, compact)}<button class="btn" data-next="${esc(s.id)}" aria-label="Play ${esc(s.title)} next">Play next</button>${genreEditor(s)}</div>`;
+    ${compact ? bpmBox(s) : ''}<span class="k">${STARS(starsOf(s))}</span>${genreChip(s, compact)}<button class="btn" data-next="${esc(s.id)}" aria-label="Play ${esc(s.title)} next">Play next</button>${genreEditor(s)}</div>`;
 }
 // One handler for every list: open the editor, then save the choice right away.
 function bindSongEditing(container, rerender) {
@@ -2568,7 +2600,29 @@ function renderSources() {
       ${(() => { const n = S.songs.filter(s => (s.pls || []).includes(id)).length; return n ? `<button class="btn" data-plsongs="${esc(id)}">Songs (${n.toLocaleString()})</button>` : (p.on ? '<span class="muted" style="font-size:13px">Reload library to see its songs</span>' : ''); })()}</div></div>`).join('')
       : `<p class="muted" style="margin:8px 0 0">${S.mode === 'spotify' ? 'Press Find my playlists to add playlists you made.' : 'Connect Spotify to add your playlists.'}</p>`);
 }
+// First time only: the neighbors you asked for, matched to your station names.
+function seedNeighbors() {
+  if (S.settings.neighborsSeeded) return;
+  const find = re => (S.stations.find(st => !st.all && re.test(st.genre)) || {}).genre;
+  const rock = find(/^rock$/i), blues = find(/blues/i), reggae = find(/reggae/i);
+  const alt = find(/altern/i), pop = find(/^pop/i), country = find(/country/i), rnb = find(/r&b|soul/i), hip = find(/hip/i);
+  S.settings.neighbors = S.settings.neighbors || {};
+  if (rock) S.settings.neighbors[rock] = [alt, pop, blues].filter(Boolean);
+  if (blues) S.settings.neighbors[blues] = [rock, country, rnb].filter(Boolean);
+  if (reggae) S.settings.neighbors[reggae] = [hip, country, pop].filter(Boolean);
+  S.settings.neighborsSeeded = true; LS.set('settings', S.settings);
+}
+function renderNeighbors() {
+  const el = $('#nbList'); if (!el) return;
+  const names = S.stations.filter(st => !st.all).map(st => st.genre);
+  el.innerHTML = names.map(g => {
+    const mine = (S.settings.neighbors || {})[g] || [];
+    const sel = k => `<select data-nb="${esc(g)}" data-k="${k}" aria-label="${esc(g)} neighbor ${k + 1}"><option value="">${k ? '—' : 'Built-in'}</option>${names.filter(n => n !== g).map(n => `<option${mine[k] === n ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`;
+    return `<div class="nbrow"><b>${esc(g)}</b><div class="nbsel">${sel(0)}${sel(1)}${sel(2)}</div></div>`;
+  }).join('');
+}
 function renderLib() {
+  renderNeighbors();
   renderLfmStatus();
   const rated = S.songs.filter(s => S.ratings[s.key] != null).length, uns = (S.pools.get('Unsorted') || []).length;
   $('#libSummary').textContent = `${S.songs.length.toLocaleString()} songs in ${S.genres.length} genres, ${rated.toLocaleString()} rated` +
@@ -2678,6 +2732,37 @@ function bind() {
   const renderOrders = () => { $('#orderPick').innerHTML = Object.entries(ORDERS).map(([k, v]) => `<button class="lenbtn" role="radio" aria-checked="${k === genOrder()}" data-order="${k}">${v}</button>`).join(''); };
   renderOrders();
   $('#orderPick').addEventListener('click', e => { const b = e.target.closest('[data-order]'); if (!b) return; S.settings.genOrder = b.dataset.order; LS.set('settings', S.settings); renderOrders(); genGenerate(); });
+  seedNeighbors(); renderNeighbors();
+  $('#nbList').addEventListener('change', e => {
+    const s = e.target.closest('[data-nb]'); if (!s) return;
+    const g = s.dataset.nb, row = [...$('#nbList').querySelectorAll(`[data-nb="${CSS.escape(g)}"]`)].map(x => x.value);
+    const clean = row.filter((v, k) => v && row.indexOf(v) === k);   // no blanks or repeats
+    S.settings.neighbors = S.settings.neighbors || {};
+    if (clean.length) S.settings.neighbors[g] = clean; else delete S.settings.neighbors[g];
+    LS.set('settings', S.settings); S.mixCache.clear(); renderNeighbors(); renderGauges(); genSoon();
+  });
+  $('#bpmFix').addEventListener('click', () => { $('#lib').close(); openLineup('all', 'nobpm'); });
+  $('#allFilter').addEventListener('change', renderAllSongs);
+  $('#allList').addEventListener('change', e => {
+    const b = e.target.closest('[data-bpm]'); if (!b) return;
+    setManualBpm(b.dataset.bpm, b.value.trim());
+    b.classList.toggle('set', !!BPM.manual[b.dataset.bpm]);
+    if (!b.value.trim()) b.value = bpmOf(S.byId.get(b.dataset.bpm)) || '';
+    genSoon();
+  });
+  // Every Library section folds up: turn each plain heading into a closed, tappable section.
+  (() => {
+    const dlg = $('#lib .dlg'); let cur = null;
+    for (const el of [...dlg.children]) {
+      if (el.tagName === 'H3') {
+        cur = document.createElement('details'); cur.className = 'fold';
+        const sum = document.createElement('summary'); sum.className = 'foldsum'; sum.textContent = el.textContent;
+        cur.appendChild(sum); el.replaceWith(cur); continue;
+      }
+      if (el.tagName === 'DETAILS' || el.tagName === 'H2' || el.id === 'libSummary' || el.querySelector?.('#libDone')) { cur = null; continue; }
+      if (cur) cur.appendChild(el);
+    }
+  })();
   const bpmReport = (t, err) => { const m = $('#bpmMsg'); m.className = 'msg' + (err ? ' err' : ''); m.textContent = t; };
   $('#bpmGo').addEventListener('click', () => lookUpBpm(bpmReport));
   $('#bpmFold').addEventListener('toggle', e => { if (e.target.open) renderBpmStatus(); });
@@ -2871,7 +2956,7 @@ function bind() {
   $('#backupBtn').addEventListener('click', async () => {
     savePlays();
     const data = { app: 'rotation-spotify', saved: new Date().toISOString(), keys: {} };
-    data.library = await IDB.get('library'); data.lfm = await IDB.get('lfm'); data.bpm = await IDB.get('bpm');
+    data.library = await IDB.get('library'); data.lfm = await IDB.get('lfm'); data.bpm = await IDB.get('bpm'); data.bpmManual = await IDB.get('bpmManual');
     for (const k of BACKUP_KEYS) { const v = LS.get(k, undefined); if (v !== undefined) data.keys[k] = v; }
     const name = `knarly-backup-${new Date().toISOString().slice(0, 10)}.json`;
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
@@ -2898,6 +2983,7 @@ function bind() {
       if (data.library) await IDB.set('library', data.library);
       if (data.lfm) await IDB.set('lfm', data.lfm);
       if (data.bpm) await IDB.set('bpm', data.bpm);
+      if (data.bpmManual) await IDB.set('bpmManual', data.bpmManual);
       m.textContent = 'Restored. Reloading…';
       setTimeout(() => location.reload(), 800);
     } catch (err) { m.textContent = err.message || 'Couldn’t read that file.'; m.classList.add('err'); }
@@ -3034,6 +3120,7 @@ async function init() {
   LFM.data = (await IDB.get('lfm')) || {};
   LFM.tags = (await IDB.get('lfmTags')) || {};
   BPM.data = (await IDB.get('bpm')) || {};
+  BPM.manual = (await IDB.get('bpmManual')) || {};
   S.lfmGenre = (await IDB.get('lfmGenre')) || {};
   // Signed in to Spotify? Stay on your library, never the demo. Load the saved copy, or fetch it again if none was saved.
   let needLoad = false;
