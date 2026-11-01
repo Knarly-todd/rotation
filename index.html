@@ -839,7 +839,7 @@ a#genOpen[hidden],#genReauth[hidden]{display:none!important}
   </div>
 </dialog>
 
-<div class="revtag" aria-hidden="true">P74</div>
+<div class="revtag" aria-hidden="true">P75</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -992,6 +992,45 @@ function resolveGenre(s) {
   for (const pid of s.pls || []) if (t.playlist[pid]) return t.playlist[pid];
   const auto = s.auto && s.auto !== 'Unsorted' ? s.auto : null;
   return t.artist[s.artist] || auto || (S.lfmGenre && S.lfmGenre[s.artist]) || 'Unsorted';
+}
+/* ---------- Duplicate songs ----------
+   The same song can have several Spotify IDs (album, single, remaster, greatest-hits copy), so playlists
+   that overlap add it twice. A song is a duplicate if it has the same recording code (ISRC), or the same
+   artist and title once tags like "Remastered 2011", "Mono" or "Radio Edit" are ignored.
+   Live, acoustic, remix, demo and instrumental versions stay separate. The first copy found is kept
+   (your Liked Songs copy, when there is one). */
+const DUP_DROP = /\b(\d{4}\s*)?(remaster(ed)?|digital(ly)? remaster(ed)?|mono|stereo|single version|album version|radio edit|single edit|deluxe( edition)?|bonus track|expanded( edition)?|anniversary edition|\d+(st|nd|rd|th) anniversary( edition)?)\b/i;
+const DUP_KEEP = /\b(live|acoustic|remix|mix|demo|instrumental|unplugged|session|karaoke|cover|reprise|re-?recorded)\b/i;
+function dupTitle(t) {
+  let s = String(t || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  s = s.replace(/\s+[-–]\s+([^-–]+)$/, (m, seg) => DUP_DROP.test(seg) && !DUP_KEEP.test(seg) ? '' : m);
+  s = s.replace(/\s*[(\[]([^)\]]*)[)\]]/g, (m, seg) => DUP_DROP.test(seg) && !DUP_KEEP.test(seg) ? '' : ` ${seg} `);
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+const dupKey = s => norm(s.artist) + '|' + dupTitle(s.title);
+function dedupeSongs(list) {
+  const byIsrc = new Map(), byKey = new Map(), out = [], gone = [];
+  for (const s of list) {
+    const k = dupKey(s), keep = (s.isrc && byIsrc.get(s.isrc)) || byKey.get(k);
+    if (keep) {
+      for (const pid of s.pls || []) if (!keep.pls.includes(pid)) keep.pls.push(pid);   // playlist genre tags still apply
+      gone.push([s.id, keep.id]); continue;
+    }
+    out.push(s); if (s.isrc) byIsrc.set(s.isrc, s); byKey.set(k, s);
+  }
+  if (gone.length) mergeSongData(gone);
+  return { out, removed: gone.length };
+}
+// Ratings, genre tags, BPMs, Last.fm counts and play history on a removed copy move to the copy that's kept.
+function mergeSongData(pairs) {
+  const copy = (obj, from, to) => { if (obj && obj[from] != null && obj[to] == null) obj[to] = obj[from]; };
+  for (const [from, to] of pairs) {
+    copy(S.ratings, from, to); copy(S.tags.song, from, to); copy(S.tags.also && S.tags.also.song, from, to);
+    copy(BPM.manual, from, to); copy(BPM.data, from, to); copy(LFM.data, from, to);
+    if (S.history[from] != null && (S.history[to] == null || S.history[from] > S.history[to])) S.history[to] = S.history[from];
+  }
+  LS.set('ratings', S.ratings); LS.set('tags', S.tags); LS.set('history', S.history);
+  IDB.set('bpmManual', BPM.manual); IDB.set('bpm', BPM.data); IDB.set('lfm', LFM.data);
 }
 function setSongs(list) {
   S.songs = list.map(s => ({ ...s, auto: s.auto || s.genre || 'Unsorted', dur: s.dur || 210000, key: s.id }));
@@ -2303,8 +2342,10 @@ async function connectFlow(fromRedirect) {
   const progress = (text, frac) => { msg.textContent = text; bar.firstElementChild.style.width = Math.round(frac * 100) + '%'; };
   try {
     if (fromRedirect) progress('Signed in. Starting…', 0.02);
-    const songs = await loadLibrary(progress);
-    if (!songs.length) throw new Error('No songs found. Like some songs or add playlists under Library & stations, then reload.');
+    const loaded = await loadLibrary(progress);
+    if (!loaded.length) throw new Error('No songs found. Like some songs or add playlists under Library & stations, then reload.');
+    const { out: songs, removed } = dedupeSongs(loaded);
+    if (removed) setTimeout(() => toast(`Skipped ${removed.toLocaleString()} duplicate song${removed === 1 ? '' : 's'} found in more than one playlist.`), 900);
     stopAll();
     S.mode = 'spotify'; LS.set('mode', 'spotify');
     S.plays = S.plays.filter(p => !p[P.DEMO]); savePlays();
@@ -3127,7 +3168,11 @@ async function init() {
   if (S.auth) {
     S.mode = 'spotify'; LS.set('mode', 'spotify');
     const lib = (await IDB.get('library')) || LS.get('library', null);
-    if (lib && lib.length) setSongs(unpack(lib)); else { setSongs([]); needLoad = true; }
+    if (lib && lib.length) {
+      const { out, removed } = dedupeSongs(unpack(lib));
+      setSongs(out);
+      if (removed) { IDB.set('library', pack(out)); setTimeout(() => toast(`Removed ${removed.toLocaleString()} duplicate song${removed === 1 ? '' : 's'} from your library.`), 900); }
+    } else { setSongs([]); needLoad = true; }
   } else {
     if (S.mode === 'spotify' && !canAutoSignIn()) { setTimeout(() => toast('You’re signed out of Spotify. Press Connect Spotify to bring your library back.'), 600); }
     if (S.mode === 'spotify') { S.mode = 'demo'; LS.set('mode', 'demo'); }

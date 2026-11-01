@@ -1,6 +1,6 @@
 // Lets Knarly install as an app and open even on a weak connection.
 // Only the app's own files are cached; Spotify and Last.fm requests always go to the network.
-const CACHE = 'knarly-p74';
+const CACHE = 'knarly-p75';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', e => {
